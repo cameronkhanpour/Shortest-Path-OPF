@@ -2,7 +2,7 @@
 
 julia_version = "1.11.4"
 manifest_format = "2.0"
-project_hash = "c1a781a52937a1c971c45f786fbc1bb795fe01d2"
+project_hash = "d5e8f493438412f7667fd933143cfc9a3a44d2c7"
 
 [[deps.ANSIColoredPrinters]]
 git-tree-sha1 = "574baf8110975760d391c710b6341da1afa48d8c"
@@ -1326,6 +1326,12 @@ deps = ["InfrastructureModels", "JSON", "JuMP", "LinearAlgebra", "Memento", "NLs
 git-tree-sha1 = "6a48b251b581d7adba8d344696fdf03c7ddde7d6"
 uuid = "c36e90e8-916a-50a6-bd94-075b64ef4655"
 version = "0.21.3"
+
+[[deps.PowerModelsAnnex]]
+deps = ["InfrastructureModels", "JuMP", "Memento", "PowerModels"]
+git-tree-sha1 = "9586539805324e50536586e2df1d8e26b87f9fb7"
+uuid = "6e471128-d39d-5672-b02b-a742bd1b77ed"
+version = "0.11.0"
 
 [[deps.PrecompileTools]]
 deps = ["Preferences"]

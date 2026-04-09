@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l \"/c/Users/Bijan/Documents/GitHub/Shortest-Path-OPF\"/*.jl)",
+      "Bash(julia convexity_metric.jl)",
+      "Bash(julia --project=. convexity_metric.jl)",
+      "Bash(julia --project=. -e \"import Pkg; Pkg.instantiate\\(\\)\")",
+      "Bash(ls -la \"c:/Users/Bijan/Documents/GitHub/Shortest-Path-OPF/\"*2026*.png)",
+      "Read(//tmp/**)",
+      "Bash(tasklist)",
+      "Bash(ls -la c:UsersBijanDocumentsGitHubShortest-Path-OPF/*.png)",
+      "Bash(sort -k6,7)",
+      "Bash(ls -la /c/Users/Bijan/Documents/GitHub/Shortest-Path-OPF/*.png)"
+    ]
+  }
+}

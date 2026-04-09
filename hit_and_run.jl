@@ -3,155 +3,249 @@ module HitAndRun
 using LinearAlgebra, Random, Printf
 
 """
-    _random_direction(dim::Int)
+    _random_direction(dim::Int, direction_basis)
 
-Generates a random unit vector in `dim` dimensions by sampling from a
-multivariate normal distribution.
+Generates a random unit vector in `dim` dimensions. If `direction_basis` is
+provided, the direction is sampled from the span of its columns; otherwise it is
+sampled isotropically from a multivariate normal distribution.
 """
-function _random_direction(dim::Int)
-    direction = randn(dim)
+function _random_direction(dim::Int,
+        direction_basis::Union{Nothing, Matrix{Float64}}=nothing)
+    if isnothing(direction_basis)
+        direction = randn(dim)
+    else
+        coeff = randn(size(direction_basis, 2))
+        direction = direction_basis * coeff
+        if norm(direction) < 1e-12
+            direction = randn(dim)
+        end
+    end
     return direction / norm(direction)
 end
 
 """
-    _line_box_intersection(direction, point, box)
+    _line_box_parameter_range(direction, point, box; tol)
 
-Finds the intersection points of a line defined by `point + t*direction` with a
-hyper-rectangle `box`. 
+Finds the parameter interval `[t_min, t_max]` for which the line
+`point + t * direction` stays inside the hyper-rectangle `box`.
 """
-#TODO maybe changing this to convex relaxation would be better  
+function _line_box_parameter_range(direction::Vector{Float64},
+        point::Vector{Float64},
+        box::Vector{Tuple{Float64, Float64}};
+        tol::Float64=1e-8)
+    t_min = -Inf
+    t_max = Inf
 
-function _line_box_intersection(direction::Vector{Float64}, point::Vector{Float64}, box::Vector{Tuple{Float64, Float64}})
-    t_vals = Float64[]
-    for i in 1:length(direction)
-        if abs(direction[i]) > 1e-9
-            t1 = (box[i][1] - point[i]) / direction[i]
-            t2 = (box[i][2] - point[i]) / direction[i]
-            push!(t_vals, t1)
-            push!(t_vals, t2)
+    for i in eachindex(direction)
+        dir_i = direction[i]
+        lo_i, hi_i = box[i]
+
+        if abs(dir_i) <= tol
+            if point[i] < lo_i - tol || point[i] > hi_i + tol
+                return 0.0, 0.0, false
+            end
+            continue
+        end
+
+        t1 = (lo_i - point[i]) / dir_i
+        t2 = (hi_i - point[i]) / dir_i
+        t_lo = min(t1, t2)
+        t_hi = max(t1, t2)
+        t_min = max(t_min, t_lo)
+        t_max = min(t_max, t_hi)
+
+        if t_min > t_max + tol
+            return 0.0, 0.0, false
         end
     end
 
-    valid_t = Float64[]
-    for t in t_vals
-        candidate_point = point .+ t .* direction
-        is_inside = true
-        for i in 1:length(direction)
-            if !(box[i][1] - 1e-9 <= candidate_point[i] <= box[i][2] + 1e-9)
-                is_inside = false
-                break
+    if !isfinite(t_min) || !isfinite(t_max) || (t_max - t_min) <= tol
+        return 0.0, 0.0, false
+    end
+
+    return t_min, t_max, true
+end
+
+"""
+    _locate_feasibility_transition(current_point, direction, t_left, left_flag, t_right, right_flag,
+                                   is_feasible; tol, max_iter)
+
+Refines a transition point between a feasible and an infeasible endpoint on the
+same line segment.
+"""
+function _locate_feasibility_transition(current_point::Vector{Float64},
+        direction::Vector{Float64},
+        t_left::Float64,
+        left_flag::Bool,
+        t_right::Float64,
+        right_flag::Bool,
+        is_feasible::Function;
+        tol::Float64=1e-8,
+        max_iter::Int=60)
+    left_flag == right_flag &&
+        error("Transition refinement requires endpoints with different feasibility labels.")
+
+    lo = t_left
+    hi = t_right
+    lo_flag = left_flag
+
+    for _ in 1:max_iter
+        mid = (lo + hi) / 2.0
+        mid_flag = is_feasible(current_point .+ mid .* direction)
+        if mid_flag == lo_flag
+            lo = mid
+        else
+            hi = mid
+        end
+        abs(hi - lo) < tol && break
+    end
+
+    return (lo + hi) / 2.0
+end
+
+"""
+    _feasible_intervals_along_line(current_point, direction, t_min, t_max, is_feasible; max_step, tol, max_iter)
+
+Approximates the full set `S ∩ {current_point + t * direction : t ∈ [t_min, t_max]}`
+as a union of feasible parameter intervals. The scan resolution is controlled by
+`max_step`, so thin components or holes smaller than that scale may be missed.
+"""
+function _feasible_intervals_along_line(current_point::Vector{Float64},
+        direction::Vector{Float64},
+        t_min::Float64,
+        t_max::Float64,
+        is_feasible::Function;
+        max_step::Float64=0.02,
+        tol::Float64=1e-8,
+        max_iter::Int=60)
+    if (t_max - t_min) <= tol
+        return Tuple{Float64, Float64}[]
+    end
+
+    n_steps = max(1, ceil(Int, (t_max - t_min) / max_step))
+    grid = collect(range(t_min, t_max; length=n_steps + 1))
+    if !any(abs(t) <= tol for t in grid) && t_min < 0.0 < t_max
+        push!(grid, 0.0)
+        sort!(grid)
+    end
+
+    flags = [is_feasible(current_point .+ t .* direction) for t in grid]
+    intervals = Tuple{Float64, Float64}[]
+    current_start = nothing
+
+    for k in 1:(length(grid) - 1)
+        t_left = grid[k]
+        t_right = grid[k + 1]
+        left_flag = flags[k]
+        right_flag = flags[k + 1]
+
+        if left_flag && isnothing(current_start)
+            current_start = t_left
+        end
+
+        if left_flag != right_flag
+            boundary = _locate_feasibility_transition(current_point, direction,
+                t_left, left_flag, t_right, right_flag, is_feasible; tol, max_iter)
+
+            if left_flag
+                push!(intervals, (current_start, boundary))
+                current_start = nothing
+            else
+                current_start = boundary
+            end
+        elseif left_flag && right_flag && k == length(grid) - 1
+            push!(intervals, (current_start, t_right))
+            current_start = nothing
+        end
+    end
+
+    if !isempty(intervals)
+        merged = Tuple{Float64, Float64}[intervals[1]]
+        for interval in intervals[2:end]
+            prev_lo, prev_hi = merged[end]
+            lo, hi = interval
+            if lo <= prev_hi + tol
+                merged[end] = (prev_lo, max(prev_hi, hi))
+            else
+                push!(merged, interval)
             end
         end
-        if is_inside
-            push!(valid_t, t)
-        end
+        return merged
     end
 
-    if length(unique(round.(valid_t, digits=8))) < 2
-        return nothing, nothing, false
-    end
-    
-    t_min = minimum(valid_t)
-    t_max = maximum(valid_t)
-    p1 = point .+ t_min .* direction
-    p2 = point .+ t_max .* direction
-    
-    return p1, p2, true
+    return intervals
 end
 
 """
-    _find_boundary_by_stepping(current_point, direction, t_end, is_feasible; num_steps=200)
+    _sample_from_interval_union(intervals; tol)
 
-Finds the boundary of the feasible set by taking small, discrete steps along a direction
-until an infeasible point is found.
-
-Note: This method can be less computationally efficient than a bisection search,
-especially if the feasible region is large along the search direction, as it
-requires many calls to the expensive `is_feasible` function. The precision of
-the boundary is also limited by the step size.
-
-# Arguments
-- `current_point`: The starting feasible point (where t=0).
-- `direction`: The unit vector direction to search along.
-- `t_end`: The maximum parameter value to search towards (from box intersection).
-- `is_feasible`: The function that checks if a point is in the feasible set S.
-- `num_steps`: The number of steps to take to cover the search interval.
-
-# Returns
-- The parameter `t` of the furthest known feasible point along the direction.
+Samples uniformly from the one-dimensional measure of a union of intervals.
 """
-function _find_boundary_by_stepping(current_point::Vector{Float64}, direction::Vector{Float64}, t_end::Float64, is_feasible::Function; num_steps=200)
-    # Assumes the starting point (at t=0) is feasible.
-    if num_steps <= 0
-        error("num_steps must be positive.")
-    end
+function _sample_from_interval_union(intervals::Vector{Tuple{Float64, Float64}};
+        tol::Float64=1e-8)
+    lengths = [max(0.0, hi - lo) for (lo, hi) in intervals]
+    total_length = sum(lengths)
+    total_length <= tol && return nothing
 
-    # The search starts from t=0 (current_point), which is known to be feasible.
-    last_feasible_t = 0.0
-    step_size = t_end / num_steps
-
-    for i in 1:num_steps
-        current_t = i * step_size
-        
-        # Check if the point at the current step is feasible
-        if is_feasible(current_point + current_t * direction)
-            # If it is, this is our new furthest known feasible point
-            last_feasible_t = current_t
-        else
-            # If it's not feasible, we have crossed the boundary.
-            # We stop and return the last point that was confirmed to be feasible.
-            break
+    target = rand() * total_length
+    cumulative = 0.0
+    for (interval, length) in zip(intervals, lengths)
+        cumulative += length
+        if target <= cumulative
+            lo, hi = interval
+            return lo + rand() * (hi - lo)
         end
     end
 
-    return last_feasible_t
+    lo, hi = intervals[end]
+    return lo + rand() * (hi - lo)
 end
-
 
 """
     next_sample(current_point, box, is_feasible)
 
-Generates the next sample using a line-search Hit-and-Run algorithm. This version
-uses a stepping method to find the feasible boundaries.
+Generates the next sample using a full-line Hit-and-Run update. Along a random
+ambient direction, the algorithm reconstructs the resolved feasible intervals of
+the line and samples uniformly from their union. If those line intervals were
+computed exactly, the uniform distribution over the full feasible set would be
+stationary even for disconnected sets. In this implementation the interval
+reconstruction is approximate, with resolution controlled by `max_step`.
 """
-function next_sample(current_point::Vector{Float64}, box::Vector{Tuple{Float64, Float64}}, is_feasible::Function; num_steps=200)
+function next_sample(current_point::Vector{Float64}, box::Vector{Tuple{Float64, Float64}},
+        is_feasible::Function; max_step::Float64=0.02, tol::Float64=1e-8,
+        max_iter::Int=60, direction_basis::Union{Nothing, Matrix{Float64}}=nothing)
     dim = length(current_point)
-    
-    while true 
-        direction = _random_direction(dim)
+    free_coordinates = findall(i -> (box[i][2] - box[i][1]) > tol, eachindex(box))
+    isempty(free_coordinates) && return copy(current_point), 0
 
-        # 1. Find the intersection with the outer bounding box.
-        p_box_1, p_box_2, success = _line_box_intersection(direction, current_point, box)
+    while true
+        direction = _random_direction(dim, direction_basis)
+        if length(free_coordinates) < dim
+            for i in eachindex(box)
+                if !(i in free_coordinates)
+                    direction[i] = 0.0
+                end
+            end
+            dir_norm = norm(direction)
+            dir_norm < tol && continue
+            direction ./= dir_norm
+        end
+        t_min_box, t_max_box, success = _line_box_parameter_range(direction, current_point, box)
         if !success
             continue
         end
-        
-        # Convert intersection points to parameters 't' along the line.
-        t_box_1 = dot(p_box_1 - current_point, direction)
-        t_box_2 = dot(p_box_2 - current_point, direction)
-        t_min_box = min(t_box_1, t_box_2)
-        t_max_box = max(t_box_1, t_box_2)
 
-        # 2. Use the stepping search to find the actual feasible boundaries.
-        # Find positive boundary (t > 0)
-        t_positive_bound = _find_boundary_by_stepping(current_point, direction, t_max_box, is_feasible; num_steps=num_steps)
+        intervals = _feasible_intervals_along_line(current_point, direction,
+            t_min_box, t_max_box, is_feasible; max_step, tol, max_iter)
+        isempty(intervals) && continue
 
-        # Find negative boundary (t < 0). Search along the negative direction.
-        # Note: -t_min_box is a positive value representing the distance to the negative boundary.
-        t_negative_bound_in_pos_dir = _find_boundary_by_stepping(current_point, -direction, -t_min_box, is_feasible; num_steps=num_steps)
-        t_negative_bound = -t_negative_bound_in_pos_dir
+        t_new = _sample_from_interval_union(intervals; tol)
+        isnothing(t_new) && continue
 
-        # If the discovered feasible segment has negligible length, try a new direction.
-        if abs(t_positive_bound - t_negative_bound) < 1e-9
+        new_point = current_point .+ t_new .* direction
+        if !is_feasible(new_point)
             continue
         end
-
-        # 3. Sample a new point uniformly from the found feasible line segment.
-        lambda = rand()
-        t_new = t_negative_bound + lambda * (t_positive_bound - t_negative_bound)
-        
-        new_point = current_point + t_new * direction
-
         return new_point, 0
     end
 end
